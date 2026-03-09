@@ -1,0 +1,6 @@
+Flask
+playwright
+gunicorn
+requests
+ddgs
+typing_extensions
