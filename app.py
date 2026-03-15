@@ -3,20 +3,21 @@ from playwright.sync_api import sync_playwright
 from ddgs import DDGS
 import requests
 import threading
-from urllib.parse import urlparse
 
 app = Flask(__name__)
+
+# =========================
+# PLAYWRIGHT IMAGE FETCHER
+# =========================
 
 playwright = None
 browser = None
 context = None
 cookies = {}
+headers = {}
 session = requests.Session()
 lock = threading.Lock()
 
-# =========================
-# PLAYWRIGHT START
-# =========================
 
 def start_browser():
     global playwright, browser, context
@@ -44,55 +45,33 @@ def start_browser():
     )
 
     refresh_session()
-
     print("Playwright ready")
 
 
-# =========================
-# COOKIE REFRESH
-# =========================
-
 def refresh_session():
-    global cookies, context
+    global cookies, headers, context
 
-    try:
-        print("Refreshing cookies...")
+    print("Refreshing cookies...")
 
-        page = context.new_page()
+    page = context.new_page()
+    page.goto("https://comix.to/", wait_until="domcontentloaded")
 
-        # load main site
-        page.goto("https://comix.to/", wait_until="domcontentloaded")
+    cookies_list = context.cookies()
+    cookies = {c["name"]: c["value"] for c in cookies_list}
 
-        # load static domain
-        page.goto("https://static.comix.to/", wait_until="domcontentloaded")
+    headers = {
+        "User-Agent": page.evaluate("() => navigator.userAgent"),
+        "Referer": "https://comix.to/",
+        "Origin": "https://comix.to"
+    }
 
-        cookies_list = context.cookies()
+    page.close()
 
-        cookies = {c["name"]: c["value"] for c in cookies_list}
+    print("Cookies refreshed")
 
-        print(f"Cookies loaded: {len(cookies)}")
-
-        page.close()
-
-    except Exception as e:
-        print("Cookie refresh error:", str(e))
-
-
-# =========================
-# FAST FETCH
-# =========================
 
 def fast_fetch(url):
     try:
-
-        parsed = urlparse(url)
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Referer": f"https://{parsed.netloc}/",
-            "Origin": f"https://{parsed.netloc}"
-        }
-
         r = session.get(
             url,
             headers=headers,
@@ -103,18 +82,12 @@ def fast_fetch(url):
         if r.status_code == 200:
             return r
 
-        print("Fetch failed status:", r.status_code, url)
-
         return None
 
     except Exception as e:
-        print("Fast fetch error:", str(e))
+        print("Fast fetch error:", e)
         return None
 
-
-# =========================
-# PROXY ROUTE
-# =========================
 
 @app.route("/proxy")
 def proxy():
@@ -125,43 +98,33 @@ def proxy():
     if not url:
         return "Missing url parameter", 400
 
-    try:
+    # lazy start browser
+    if context is None:
+        with lock:
+            if context is None:
+                start_browser()
 
-        # lazy start browser
-        if context is None:
-            with lock:
-                if context is None:
-                    start_browser()
+    # try fast HTTP
+    r = fast_fetch(url)
+    if r:
+        return Response(
+            r.content,
+            status=r.status_code,
+            content_type=r.headers.get("content-type", "image/webp")
+        )
 
-        r = fast_fetch(url)
+    # fallback refresh
+    refresh_session()
 
-        if r:
-            return Response(
-                r.content,
-                status=r.status_code,
-                content_type=r.headers.get("content-type", "image/webp")
-            )
+    r = fast_fetch(url)
+    if r:
+        return Response(
+            r.content,
+            status=r.status_code,
+            content_type=r.headers.get("content-type", "image/webp")
+        )
 
-        print("Retry after refreshing cookies:", url)
-
-        refresh_session()
-
-        r = fast_fetch(url)
-
-        if r:
-            return Response(
-                r.content,
-                status=r.status_code,
-                content_type=r.headers.get("content-type", "image/webp")
-            )
-
-        print("Proxy failed completely:", url)
-
-        return "Proxy failed", 500
-
-    except Exception as e:
-        print("Proxy error:", str(e))
-        return "Internal error", 500
+    return "Failed", 500
 
 
 # =========================
@@ -174,13 +137,12 @@ def ddg_search(query, max_results=5):
             results = ddgs.text(query, max_results=max_results)
             return list(results)
     except Exception as e:
-        print("Search error:", str(e))
+        print("Search error:", e)
         return []
 
 
 @app.route("/search")
 def search():
-
     query = request.args.get("q", "")
     max_results = int(request.args.get("max_results", 5))
 
@@ -201,10 +163,6 @@ def search():
     return jsonify({"results": simplified})
 
 
-# =========================
-# HOME
-# =========================
-
 @app.route("/")
 def home():
     return """
@@ -213,10 +171,6 @@ def home():
     <p>/search?q=QUERY</p>
     """
 
-
-# =========================
-# RUN
-# =========================
 
 if __name__ == "__main__":
     start_browser()
