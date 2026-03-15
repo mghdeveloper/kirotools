@@ -104,27 +104,71 @@ def proxy():
             if context is None:
                 start_browser()
 
-    # try fast HTTP
-    r = fast_fetch(url)
-    if r:
-        return Response(
-            r.content,
-            status=r.status_code,
-            content_type=r.headers.get("content-type", "image/webp")
-        )
+    try:
 
-    # fallback refresh
-    refresh_session()
+        # =========================
+        # FORCE PLAYWRIGHT FOR COMIX
+        # =========================
+        if "static.comix.to" in url:
 
-    r = fast_fetch(url)
-    if r:
-        return Response(
-            r.content,
-            status=r.status_code,
-            content_type=r.headers.get("content-type", "image/webp")
-        )
+            print("Playwright fetch:", url)
 
-    return "Failed", 500
+            page = context.new_page()
+
+            try:
+                response = page.goto(url, wait_until="domcontentloaded", timeout=15000)
+
+                if not response:
+                    raise Exception("No response from page")
+
+                body = response.body()
+                content_type = response.headers.get("content-type", "image/webp")
+
+                page.close()
+
+                return Response(
+                    body,
+                    status=200,
+                    content_type=content_type
+                )
+
+            except Exception as e:
+                print("Playwright image error:", e)
+                page.close()
+                return "Playwright fetch failed", 500
+
+
+        # =========================
+        # NORMAL FAST FETCH
+        # =========================
+        r = fast_fetch(url)
+
+        if r:
+            return Response(
+                r.content,
+                status=r.status_code,
+                content_type=r.headers.get("content-type", "image/webp")
+            )
+
+        # =========================
+        # REFRESH SESSION
+        # =========================
+        refresh_session()
+
+        r = fast_fetch(url)
+
+        if r:
+            return Response(
+                r.content,
+                status=r.status_code,
+                content_type=r.headers.get("content-type", "image/webp")
+            )
+
+        return "Failed", 500
+
+    except Exception as e:
+        print("Proxy error:", e)
+        return "Internal proxy error", 500
 
 
 # =========================
