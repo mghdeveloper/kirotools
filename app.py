@@ -8,7 +8,12 @@ from io import BytesIO
 from PIL import Image as PILImage
 import tempfile
 import os
+import uuid
+import threading
+import time
 
+jobs = {}
+jobs_lock = threading.Lock()
 app = Flask(__name__)
 
 # =========================
@@ -126,62 +131,123 @@ def proxy():
 # =========================
 # 🚀 PDF BUILDER (NEW)
 # =========================
+import uuid
+import threading
+import time
 
-@app.route("/build_pdf", methods=["POST"])
-def build_pdf():
-    if not pdf_semaphore.acquire(blocking=False):
-        return jsonify({"error": "Server busy"}), 429
+jobs = {}
+jobs_lock = threading.Lock()
+import img2pdf
 
+def pdf_worker(job_id, image_urls):
     try:
-        data = request.json
-        image_urls = data.get("images", [])[:120]
+        with jobs_lock:
+            jobs[job_id]["status"] = "processing"
+            jobs[job_id]["progress"] = 0
 
-        if not image_urls:
-            return jsonify({"error": "No images"}), 400
+        temp_images = []
 
-        temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        doc = SimpleDocTemplate(temp_pdf.name)
-
-        elements = []
-
-        for url in image_urls:
+        for i, url in enumerate(image_urls):
             try:
-                # 🔥 USE YOUR EXTERNAL PROXY
                 proxy_url = f"https://kiroflix.site/backend/mangaposterproxy.php?url={url}"
-
                 r = requests.get(proxy_url, timeout=20)
 
                 if r.status_code != 200:
                     continue
 
-                img = PILImage.open(BytesIO(r.content)).convert("RGB")
-                img.thumbnail((1200, 2000))
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+                temp_file.write(r.content)
+                temp_file.close()
 
-                img_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-                img.save(img_temp.name, "JPEG", quality=80)
+                temp_images.append(temp_file.name)
 
-                elements.append(Image(img_temp.name))
+                with jobs_lock:
+                    jobs[job_id]["progress"] = int((i + 1) / len(image_urls) * 80)
 
             except Exception as e:
                 print("Image error:", e)
 
-        if not elements:
-            return jsonify({"error": "PDF build failed"}), 500
+        if not temp_images:
+            raise Exception("No images downloaded")
 
-        doc.build(elements)
+        pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
 
-        def generate():
-            with open(temp_pdf.name, "rb") as f:
-                while chunk := f.read(8192):
-                    yield chunk
+        with open(pdf_path, "wb") as f:
+            f.write(img2pdf.convert(temp_images))
 
-            os.unlink(temp_pdf.name)
+        # cleanup images
+        for path in temp_images:
+            os.unlink(path)
 
-        return Response(generate(), content_type="application/pdf")
+        with jobs_lock:
+            jobs[job_id]["status"] = "done"
+            jobs[job_id]["progress"] = 100
+            jobs[job_id]["file"] = pdf_path
 
-    finally:
-        pdf_semaphore.release()
+    except Exception as e:
+        with jobs_lock:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["error"] = str(e)
+    @app.route("/build_pdf_async", methods=["POST"])
+def build_pdf_async():
+    data = request.json
+    image_urls = data.get("images", [])[:120]
 
+    if not image_urls:
+        return jsonify({"error": "No images"}), 400
+
+    job_id = str(uuid.uuid4())
+
+    with jobs_lock:
+        jobs[job_id] = {
+            "status": "queued",
+            "progress": 0
+        }
+
+    threading.Thread(
+        target=pdf_worker,
+        args=(job_id, image_urls),
+        daemon=True
+    ).start()
+
+    return jsonify({"jobId": job_id})
+    @app.route("/pdf_status")
+def pdf_status():
+    job_id = request.args.get("jobId")
+
+    if not job_id or job_id not in jobs:
+        return jsonify({"error": "Invalid jobId"}), 404
+
+    job = jobs[job_id]
+
+    return jsonify({
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "error": job.get("error")
+    })
+    @app.route("/pdf_download")
+def pdf_download():
+    job_id = request.args.get("jobId")
+
+    if not job_id or job_id not in jobs:
+        return "Invalid jobId", 404
+
+    job = jobs[job_id]
+
+    if job["status"] != "done":
+        return "Not ready", 400
+
+    def generate():
+        with open(job["file"], "rb") as f:
+            while chunk := f.read(8192):
+                yield chunk
+
+        os.unlink(job["file"])
+
+        with jobs_lock:
+            del jobs[job_id]
+
+    return Response(generate(), content_type="application/pdf")
 
 # =========================
 # SEARCH
