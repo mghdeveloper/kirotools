@@ -129,70 +129,128 @@ def proxy():
 
 
 # =========================
-# 🚀 PDF BUILDER (NEW)
+# 🚀 PDF BUILDER (FAST + STABLE)
 # =========================
 import uuid
 import threading
-import time
+import tempfile
+import os
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import request, jsonify, Response
+from PIL import Image
+from io import BytesIO
+import img2pdf
 
 jobs = {}
 jobs_lock = threading.Lock()
-import img2pdf
+
+MAX_WORKERS = 5
+MAX_RETRIES = 2
+
 
 # =========================
-# PDF WORKER SYSTEM
+# 🔽 DOWNLOAD + CONVERT
 # =========================
+session = requests.Session()
 
+def download_and_convert(url, index):
+    for attempt in range(MAX_RETRIES):
+        try:
+            proxy_url = f"https://kiroflix.site/backend/mangaposterproxy.php?url={url}"
+            print(f"📥 [{index}] Attempt {attempt+1}")
+
+            r = session.get(proxy_url, timeout=15)
+
+            if r.status_code != 200:
+                continue
+
+            # 🔥 convert WEBP → JPEG (important)
+            img = Image.open(BytesIO(r.content)).convert("RGB")
+
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            img.save(temp_file.name, "JPEG", quality=85)
+
+            return index, temp_file.name
+
+        except Exception as e:
+            print(f"❌ [{index}] Error:", e)
+
+    return index, None
+
+
+# =========================
+# 🧠 WORKER
+# =========================
 def pdf_worker(job_id, image_urls):
     try:
+        total = len(image_urls)
+
         with jobs_lock:
             jobs[job_id]["status"] = "processing"
             jobs[job_id]["progress"] = 0
 
-        temp_images = []
+        results = [None] * total
+        completed = 0
 
-        for i, url in enumerate(image_urls):
-            try:
-                proxy_url = f"https://kiroflix.site/backend/mangaposterproxy.php?url={url}"
-                print("📥 Downloading:", proxy_url)
+        print("🚀 Parallel downloading...")
 
-                r = requests.get(proxy_url, timeout=20)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [
+                executor.submit(download_and_convert, url, i)
+                for i, url in enumerate(image_urls)
+            ]
 
-                if r.status_code != 200:
-                    print("❌ Bad status:", r.status_code)
-                    continue
+            for future in as_completed(futures):
+                index, path = future.result()
 
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-                temp_file.write(r.content)
-                temp_file.close()
+                if path:
+                    results[index] = path
 
-                temp_images.append(temp_file.name)
+                completed += 1
 
+                # 🔥 0 → 70 (download phase)
                 with jobs_lock:
-                    jobs[job_id]["progress"] = int((i + 1) / len(image_urls) * 80)
+                    jobs[job_id]["progress"] = int((completed / total) * 70)
 
-            except Exception as e:
-                print("❌ Image error:", e)
+        # remove failed
+        images = [p for p in results if p]
 
-        if not temp_images:
+        if not images:
             raise Exception("No images downloaded")
-
-        pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
 
         print("📄 Building PDF...")
 
-        with open(pdf_path, "wb") as f:
-            f.write(img2pdf.convert(temp_images))
+        pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
 
-        for path in temp_images:
-            os.unlink(path)
+        # 🔥 chunk build to avoid freeze
+        chunk_size = 10
+        total_chunks = (len(images) + chunk_size - 1) // chunk_size
+
+        with open(pdf_path, "wb") as f:
+            for i in range(0, len(images), chunk_size):
+                chunk = images[i:i + chunk_size]
+                f.write(img2pdf.convert(chunk))
+
+                # 🔥 70 → 100 (build phase)
+                with jobs_lock:
+                    jobs[job_id]["progress"] = 70 + int(
+                        (i / len(images)) * 30
+                    )
+
+        # cleanup
+        for p in images:
+            try:
+                os.unlink(p)
+            except:
+                pass
 
         with jobs_lock:
             jobs[job_id]["status"] = "done"
             jobs[job_id]["progress"] = 100
             jobs[job_id]["file"] = pdf_path
 
-        print("✅ PDF DONE:", job_id)
+        print("✅ DONE:", job_id)
 
     except Exception as e:
         print("❌ WORKER ERROR:", e)
@@ -203,9 +261,8 @@ def pdf_worker(job_id, image_urls):
 
 
 # =========================
-# ROUTES (OUTSIDE FUNCTIONS!)
+# 🌐 ROUTES
 # =========================
-
 @app.route("/build_pdf_async", methods=["POST"])
 def build_pdf_async():
     data = request.json
@@ -228,7 +285,7 @@ def build_pdf_async():
         daemon=True
     ).start()
 
-    print("🚀 Job started:", job_id)
+    print("🚀 Job:", job_id)
 
     return jsonify({"jobId": job_id})
 
@@ -272,7 +329,6 @@ def pdf_download():
             del jobs[job_id]
 
     return Response(generate(), content_type="application/pdf")
-
 # =========================
 # SEARCH
 # =========================
