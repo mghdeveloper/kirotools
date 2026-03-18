@@ -139,6 +139,10 @@ jobs = {}
 jobs_lock = threading.Lock()
 import img2pdf
 
+# =========================
+# PDF WORKER SYSTEM
+# =========================
+
 def pdf_worker(job_id, image_urls):
     try:
         with jobs_lock:
@@ -150,9 +154,12 @@ def pdf_worker(job_id, image_urls):
         for i, url in enumerate(image_urls):
             try:
                 proxy_url = f"https://kiroflix.site/backend/mangaposterproxy.php?url={url}"
+                print("📥 Downloading:", proxy_url)
+
                 r = requests.get(proxy_url, timeout=20)
 
                 if r.status_code != 200:
+                    print("❌ Bad status:", r.status_code)
                     continue
 
                 temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
@@ -165,17 +172,18 @@ def pdf_worker(job_id, image_urls):
                     jobs[job_id]["progress"] = int((i + 1) / len(image_urls) * 80)
 
             except Exception as e:
-                print("Image error:", e)
+                print("❌ Image error:", e)
 
         if not temp_images:
             raise Exception("No images downloaded")
 
         pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
 
+        print("📄 Building PDF...")
+
         with open(pdf_path, "wb") as f:
             f.write(img2pdf.convert(temp_images))
 
-        # cleanup images
         for path in temp_images:
             os.unlink(path)
 
@@ -184,11 +192,21 @@ def pdf_worker(job_id, image_urls):
             jobs[job_id]["progress"] = 100
             jobs[job_id]["file"] = pdf_path
 
+        print("✅ PDF DONE:", job_id)
+
     except Exception as e:
+        print("❌ WORKER ERROR:", e)
+
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = str(e)
-    @app.route("/build_pdf_async", methods=["POST"])
+
+
+# =========================
+# ROUTES (OUTSIDE FUNCTIONS!)
+# =========================
+
+@app.route("/build_pdf_async", methods=["POST"])
 def build_pdf_async():
     data = request.json
     image_urls = data.get("images", [])[:120]
@@ -210,8 +228,12 @@ def build_pdf_async():
         daemon=True
     ).start()
 
+    print("🚀 Job started:", job_id)
+
     return jsonify({"jobId": job_id})
-    @app.route("/pdf_status")
+
+
+@app.route("/pdf_status")
 def pdf_status():
     job_id = request.args.get("jobId")
 
@@ -225,7 +247,9 @@ def pdf_status():
         "progress": job.get("progress", 0),
         "error": job.get("error")
     })
-    @app.route("/pdf_download")
+
+
+@app.route("/pdf_download")
 def pdf_download():
     job_id = request.args.get("jobId")
 
