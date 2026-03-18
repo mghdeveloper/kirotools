@@ -5,3 +5,4 @@ ddgs
 reportlab
 pillow
 gunicorn
+img2pdf
