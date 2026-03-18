@@ -1,6 +1,7 @@
-Flask
-playwright
-gunicorn
+flask
 requests
+playwright
 ddgs
-typing_extensions
+reportlab
+pillow
+gunicorn
