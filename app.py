@@ -217,6 +217,8 @@ def split_image_if_needed(image_path):
         pass
 
     return parts
+
+
     def pdf_worker(job_id, image_urls):
     try:
         total = len(image_urls)
