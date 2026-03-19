@@ -3,23 +3,19 @@ from playwright.sync_api import sync_playwright
 from ddgs import DDGS
 import requests
 import threading
-from reportlab.platypus import SimpleDocTemplate, Image
 from io import BytesIO
-from PIL import Image as PILImage
+from PIL import Image
 import tempfile
 import os
 import uuid
-import threading
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import img2pdf
 
-jobs = {}
-jobs_lock = threading.Lock()
 app = Flask(__name__)
 
 # =========================
 # GLOBALS
 # =========================
-
 playwright = None
 browser = None
 context = None
@@ -27,6 +23,11 @@ cookies = {}
 headers = {}
 session = requests.Session()
 lock = threading.Lock()
+jobs = {}
+jobs_lock = threading.Lock()
+
+MAX_WORKERS = 5
+MAX_RETRIES = 2
 
 # limit heavy PDF builds
 from threading import Semaphore
@@ -35,7 +36,6 @@ pdf_semaphore = Semaphore(2)
 # =========================
 # PLAYWRIGHT IMAGE FETCHER
 # =========================
-
 def start_browser():
     global playwright, browser, context
 
@@ -129,31 +129,8 @@ def proxy():
 
 
 # =========================
-# 🚀 PDF BUILDER (FAST + STABLE)
+# DOWNLOAD + CONVERT
 # =========================
-import uuid
-import threading
-import tempfile
-import os
-import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import request, jsonify, Response
-from PIL import Image
-from io import BytesIO
-import img2pdf
-
-jobs = {}
-jobs_lock = threading.Lock()
-
-MAX_WORKERS = 5
-MAX_RETRIES = 2
-
-
-# =========================
-# 🔽 DOWNLOAD + CONVERT
-# =========================
-session = requests.Session()
-
 def download_and_convert(url, index):
     for attempt in range(MAX_RETRIES):
         try:
@@ -165,11 +142,11 @@ def download_and_convert(url, index):
             if r.status_code != 200:
                 continue
 
-            # 🔥 convert WEBP → JPEG (important)
+            # convert WEBP → JPEG (keep quality)
             img = Image.open(BytesIO(r.content)).convert("RGB")
 
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-            img.save(temp_file.name, "JPEG", quality=85)
+            img.save(temp_file.name, "JPEG", quality=100, subsampling=0)
 
             return index, temp_file.name
 
@@ -180,15 +157,14 @@ def download_and_convert(url, index):
 
 
 # =========================
-# 🧠 WORKER
+# SPLIT TALL IMAGES
 # =========================
 def split_image_if_needed(image_path):
-    MAX_HEIGHT = 2000  # safe page height (no scaling trigger)
+    MAX_HEIGHT = 2000  # safe page height
 
     img = Image.open(image_path)
     width, height = img.size
 
-    # If image is fine → return as is
     if height <= MAX_HEIGHT:
         return [image_path]
 
@@ -196,21 +172,17 @@ def split_image_if_needed(image_path):
 
     parts = []
     y = 0
-    index = 0
 
     while y < height:
         box = (0, y, width, min(y + MAX_HEIGHT, height))
         part = img.crop(box)
 
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-        part.save(temp_file.name, "JPEG", subsampling=0, quality=100)
+        part.save(temp_file.name, "JPEG", quality=100, subsampling=0)
 
         parts.append(temp_file.name)
-
         y += MAX_HEIGHT
-        index += 1
 
-    # remove original (optional)
     try:
         os.unlink(image_path)
     except:
@@ -219,7 +191,10 @@ def split_image_if_needed(image_path):
     return parts
 
 
-    def pdf_worker(job_id, image_urls):
+# =========================
+# PDF WORKER
+# =========================
+def pdf_worker(job_id, image_urls):
     try:
         total = len(image_urls)
 
@@ -232,9 +207,6 @@ def split_image_if_needed(image_path):
 
         print("🚀 Parallel downloading...")
 
-        # =========================
-        # DOWNLOAD
-        # =========================
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [
                 executor.submit(download_and_convert, url, i)
@@ -243,27 +215,20 @@ def split_image_if_needed(image_path):
 
             for future in as_completed(futures):
                 index, path = future.result()
-
                 if path:
                     results[index] = path
 
                 completed += 1
-
                 with jobs_lock:
                     jobs[job_id]["progress"] = int((completed / total) * 60)
 
         images = [p for p in results if p]
-
         if not images:
             raise Exception("No images downloaded")
 
         print("✂️ Processing images (no scaling)...")
 
-        # =========================
-        # SPLIT TALL IMAGES
-        # =========================
         processed_images = []
-
         for i, img_path in enumerate(images):
             parts = split_image_if_needed(img_path)
             processed_images.extend(parts)
@@ -275,15 +240,9 @@ def split_image_if_needed(image_path):
 
         pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
 
-        # =========================
-        # BUILD PDF (NO SCALING)
-        # =========================
         with open(pdf_path, "wb") as f:
             f.write(img2pdf.convert(processed_images))
 
-        # =========================
-        # CLEANUP
-        # =========================
         for p in processed_images:
             try:
                 os.unlink(p)
@@ -299,13 +258,13 @@ def split_image_if_needed(image_path):
 
     except Exception as e:
         print("❌ WORKER ERROR:", e)
-
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = str(e)
 
+
 # =========================
-# 🌐 ROUTES
+# ROUTES
 # =========================
 @app.route("/build_pdf_async", methods=["POST"])
 def build_pdf_async():
@@ -318,31 +277,21 @@ def build_pdf_async():
     job_id = str(uuid.uuid4())
 
     with jobs_lock:
-        jobs[job_id] = {
-            "status": "queued",
-            "progress": 0
-        }
+        jobs[job_id] = {"status": "queued", "progress": 0}
 
-    threading.Thread(
-        target=pdf_worker,
-        args=(job_id, image_urls),
-        daemon=True
-    ).start()
+    threading.Thread(target=pdf_worker, args=(job_id, image_urls), daemon=True).start()
 
     print("🚀 Job:", job_id)
-
     return jsonify({"jobId": job_id})
 
 
 @app.route("/pdf_status")
 def pdf_status():
     job_id = request.args.get("jobId")
-
     if not job_id or job_id not in jobs:
         return jsonify({"error": "Invalid jobId"}), 404
 
     job = jobs[job_id]
-
     return jsonify({
         "status": job["status"],
         "progress": job.get("progress", 0),
@@ -353,12 +302,10 @@ def pdf_status():
 @app.route("/pdf_download")
 def pdf_download():
     job_id = request.args.get("jobId")
-
     if not job_id or job_id not in jobs:
         return "Invalid jobId", 404
 
     job = jobs[job_id]
-
     if job["status"] != "done":
         return "Not ready", 400
 
@@ -366,17 +313,16 @@ def pdf_download():
         with open(job["file"], "rb") as f:
             while chunk := f.read(8192):
                 yield chunk
-
         os.unlink(job["file"])
-
         with jobs_lock:
             del jobs[job_id]
 
     return Response(generate(), content_type="application/pdf")
+
+
 # =========================
 # SEARCH
 # =========================
-
 def ddg_search(query, max_results=5):
     try:
         with DDGS() as ddgs:
@@ -395,15 +341,13 @@ def search():
         return jsonify({"error": "No query provided"}), 400
 
     results = ddg_search(query, max_results)
-
     return jsonify({
         "results": [
             {
                 "title": r.get("title", ""),
                 "url": r.get("href", ""),
                 "description": r.get("body", "")
-            }
-            for r in results
+            } for r in results
         ]
     })
 
@@ -413,7 +357,9 @@ def home():
     return """
     <h2>Unified API</h2>
     <p>/proxy?url=IMAGE_URL</p>
-    <p>/build_pdf (POST)</p>
+    <p>/build_pdf_async (POST)</p>
+    <p>/pdf_status?jobId=JOB_ID</p>
+    <p>/pdf_download?jobId=JOB_ID</p>
     <p>/search?q=QUERY</p>
     """
 
