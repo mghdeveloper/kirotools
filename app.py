@@ -182,7 +182,42 @@ def download_and_convert(url, index):
 # =========================
 # 🧠 WORKER
 # =========================
-def pdf_worker(job_id, image_urls):
+def split_image_if_needed(image_path):
+    MAX_HEIGHT = 2000  # safe page height (no scaling trigger)
+
+    img = Image.open(image_path)
+    width, height = img.size
+
+    # If image is fine → return as is
+    if height <= MAX_HEIGHT:
+        return [image_path]
+
+    print(f"✂️ Splitting tall image: {height}px")
+
+    parts = []
+    y = 0
+    index = 0
+
+    while y < height:
+        box = (0, y, width, min(y + MAX_HEIGHT, height))
+        part = img.crop(box)
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        part.save(temp_file.name, "JPEG", subsampling=0, quality=100)
+
+        parts.append(temp_file.name)
+
+        y += MAX_HEIGHT
+        index += 1
+
+    # remove original (optional)
+    try:
+        os.unlink(image_path)
+    except:
+        pass
+
+    return parts
+    def pdf_worker(job_id, image_urls):
     try:
         total = len(image_urls)
 
@@ -196,7 +231,7 @@ def pdf_worker(job_id, image_urls):
         print("🚀 Parallel downloading...")
 
         # =========================
-        # DOWNLOAD PHASE
+        # DOWNLOAD
         # =========================
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [
@@ -212,38 +247,42 @@ def pdf_worker(job_id, image_urls):
 
                 completed += 1
 
-                # 0 → 70%
                 with jobs_lock:
-                    jobs[job_id]["progress"] = int((completed / total) * 70)
+                    jobs[job_id]["progress"] = int((completed / total) * 60)
 
-        # remove failed downloads
         images = [p for p in results if p]
 
         if not images:
             raise Exception("No images downloaded")
 
-        print(f"📄 Building PDF with {len(images)} images...")
+        print("✂️ Processing images (no scaling)...")
+
+        # =========================
+        # SPLIT TALL IMAGES
+        # =========================
+        processed_images = []
+
+        for i, img_path in enumerate(images):
+            parts = split_image_if_needed(img_path)
+            processed_images.extend(parts)
+
+            with jobs_lock:
+                jobs[job_id]["progress"] = 60 + int((i / len(images)) * 20)
+
+        print(f"📄 Building PDF ({len(processed_images)} pages)...")
 
         pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
 
         # =========================
-        # PDF BUILD (FIXED)
+        # BUILD PDF (NO SCALING)
         # =========================
         with open(pdf_path, "wb") as f:
-            # Convert ALL images at once (CRITICAL FIX)
-            pdf_bytes = img2pdf.convert(images)
-            f.write(pdf_bytes)
-
-        # =========================
-        # FINAL PROGRESS UPDATE
-        # =========================
-        with jobs_lock:
-            jobs[job_id]["progress"] = 100
+            f.write(img2pdf.convert(processed_images))
 
         # =========================
         # CLEANUP
         # =========================
-        for p in images:
+        for p in processed_images:
             try:
                 os.unlink(p)
             except:
@@ -251,6 +290,7 @@ def pdf_worker(job_id, image_urls):
 
         with jobs_lock:
             jobs[job_id]["status"] = "done"
+            jobs[job_id]["progress"] = 100
             jobs[job_id]["file"] = pdf_path
 
         print("✅ DONE:", job_id)
