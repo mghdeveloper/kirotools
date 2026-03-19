@@ -195,6 +195,9 @@ def pdf_worker(job_id, image_urls):
 
         print("🚀 Parallel downloading...")
 
+        # =========================
+        # DOWNLOAD PHASE
+        # =========================
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [
                 executor.submit(download_and_convert, url, i)
@@ -209,36 +212,37 @@ def pdf_worker(job_id, image_urls):
 
                 completed += 1
 
-                # 🔥 0 → 70 (download phase)
+                # 0 → 70%
                 with jobs_lock:
                     jobs[job_id]["progress"] = int((completed / total) * 70)
 
-        # remove failed
+        # remove failed downloads
         images = [p for p in results if p]
 
         if not images:
             raise Exception("No images downloaded")
 
-        print("📄 Building PDF...")
+        print(f"📄 Building PDF with {len(images)} images...")
 
         pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
 
-        # 🔥 chunk build to avoid freeze
-        chunk_size = 10
-        total_chunks = (len(images) + chunk_size - 1) // chunk_size
-
+        # =========================
+        # PDF BUILD (FIXED)
+        # =========================
         with open(pdf_path, "wb") as f:
-            for i in range(0, len(images), chunk_size):
-                chunk = images[i:i + chunk_size]
-                f.write(img2pdf.convert(chunk))
+            # Convert ALL images at once (CRITICAL FIX)
+            pdf_bytes = img2pdf.convert(images)
+            f.write(pdf_bytes)
 
-                # 🔥 70 → 100 (build phase)
-                with jobs_lock:
-                    jobs[job_id]["progress"] = 70 + int(
-                        (i / len(images)) * 30
-                    )
+        # =========================
+        # FINAL PROGRESS UPDATE
+        # =========================
+        with jobs_lock:
+            jobs[job_id]["progress"] = 100
 
-        # cleanup
+        # =========================
+        # CLEANUP
+        # =========================
         for p in images:
             try:
                 os.unlink(p)
@@ -247,7 +251,6 @@ def pdf_worker(job_id, image_urls):
 
         with jobs_lock:
             jobs[job_id]["status"] = "done"
-            jobs[job_id]["progress"] = 100
             jobs[job_id]["file"] = pdf_path
 
         print("✅ DONE:", job_id)
@@ -258,7 +261,6 @@ def pdf_worker(job_id, image_urls):
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = str(e)
-
 
 # =========================
 # 🌐 ROUTES
