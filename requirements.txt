@@ -2,7 +2,6 @@ flask
 requests
 playwright
 ddgs
-reportlab
 pillow
+reportlab
 gunicorn
-img2pdf
