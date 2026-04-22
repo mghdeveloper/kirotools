@@ -96,86 +96,77 @@ def proxy():
     return "Failed", 500
 @app.route("/get_token")
 def get_token():
-    global playwright, browser
-
-    target_url = request.args.get("url")
-    if not target_url:
+    url = request.args.get("url")
+    if not url:
         return jsonify({"success": False, "error": "Missing url"}), 400
 
+    from playwright.sync_api import sync_playwright
+    import urllib.parse as up
+    import time
+    import traceback
+
     try:
-        print("🚀 Getting token for:", target_url)
-
-        # Start playwright if not started
-        if playwright is None:
-            playwright = sync_playwright().start()
-
-        if browser is None:
-            browser = playwright.chromium.launch(
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-        )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
 
-        page = context.new_page()
+            page = context.new_page()
 
-        token_data = {"value": None}
+            token_data = {"value": None}
 
-        def handle_request(request):
-            try:
-                url = request.url
+            # ✅ LISTEN REQUESTS
+            def handle_request(request):
+                try:
+                    req_url = request.url
 
-                if "/chapters" in url and "_=" in url:
-                    print("✅ TOKEN REQUEST:", url)
+                    if "/chapters" in req_url and "_=" in req_url:
+                        parsed = up.urlparse(req_url)
+                        query = up.parse_qs(parsed.query)
+                        token = query.get("_", [None])[0]
 
-                    import urllib.parse as up
-                    parsed = up.urlparse(url)
-                    query = up.parse_qs(parsed.query)
+                        if token:
+                            print("🔥 TOKEN FOUND:", token)
+                            token_data["value"] = token
 
-                    token = query.get("_", [None])[0]
+                except Exception:
+                    traceback.print_exc()
 
-                    if token:
-                        print("🔥 TOKEN FOUND:", token)
-                        token_data["value"] = token
+            page.on("request", handle_request)
 
-                        # 🔥 CLOSE IMMEDIATELY
-                        page.close()
-                        context.close()
+            print("🌐 Opening:", url)
 
-            except Exception as e:
-                print("❌ Handler error:", e)
+            # ❌ DO NOT USE networkidle
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        page.on("request", handle_request)
+            # ✅ WAIT LOOP (like your working script)
+            start = time.time()
+            while time.time() - start < 10:
+                if token_data["value"]:
+                    break
+                time.sleep(0.3)
 
-        page.goto(target_url, wait_until="networkidle")
+            browser.close()
 
-        # wait max 8 seconds
-        import time
-        start = time.time()
-
-        while time.time() - start < 8:
             if token_data["value"]:
-                break
-            time.sleep(0.3)
+                return jsonify({
+                    "success": True,
+                    "token": token_data["value"]
+                })
 
-        if token_data["value"]:
             return jsonify({
-                "success": True,
-                "token": token_data["value"]
-            })
-
-        return jsonify({
-            "success": False,
-            "error": "Token not found"
-        }), 500
+                "success": False,
+                "error": "Token not found"
+            }), 500
 
     except Exception as e:
-        import traceback
-        print("❌ Fatal error:")
         traceback.print_exc()
-
         return jsonify({
             "success": False,
             "error": str(e)
