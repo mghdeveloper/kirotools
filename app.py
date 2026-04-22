@@ -97,20 +97,21 @@ def proxy():
     return "Failed", 500
 @app.route("/get_token")
 def get_token():
-    global playwright, browser
+    from playwright.sync_api import sync_playwright
+    import urllib.parse as up
+    import time
+    import traceback
 
     url = request.args.get("url")
     if not url:
         return jsonify({"success": False, "error": "Missing url"}), 400
-
-    import time, urllib.parse as up, traceback
 
     # =========================
     # ✅ CACHE CHECK
     # =========================
     cached = token_cache.get(url)
     if cached and cached["expires"] > time.time():
-        print("⚡ CACHE HIT")
+        print("⚡ CACHE HIT:", url)
         return jsonify({
             "success": True,
             "token": cached["token"],
@@ -118,82 +119,82 @@ def get_token():
         })
 
     try:
-        # =========================
-        # ✅ START BROWSER ONCE
-        # =========================
-        if browser is None:
-            print("🚀 Starting browser...")
-            playwright = sync_playwright().start()
-            browser = playwright.chromium.launch(
+        token_value = None
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ]
             )
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
-        )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
 
-        page = context.new_page()
+            page = context.new_page()
 
-        # =========================
-        # 🚀 SPEED BOOST (BLOCK USELESS FILES)
-        # =========================
-        page.route("**/*", lambda route: route.abort()
-                   if route.request.resource_type in ["image", "font", "media"]
-                   else route.continue_())
-
-        token_data = {"value": None}
-
-        # =========================
-        # 🎯 LISTEN FOR TOKEN
-        # =========================
-        def handle_request(request):
-            try:
-                req_url = request.url
-
-                if "/chapters" in req_url and "_=" in req_url:
-                    parsed = up.urlparse(req_url)
-                    query = up.parse_qs(parsed.query)
-                    token = query.get("_", [None])[0]
-
-                    if token:
-                        print("🔥 TOKEN FOUND:", token)
-                        token_data["value"] = token
-
-            except:
-                traceback.print_exc()
-
-        page.on("request", handle_request)
-
-        print("🌐 Opening:", url)
-
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-        # =========================
-        # ⏳ WAIT SHORT (FAST EXIT)
-        # =========================
-        start = time.time()
-        while time.time() - start < 8:
-            if token_data["value"]:
-                break
-            time.sleep(0.2)
-
-        page.close()
-        context.close()
-
-        if token_data["value"]:
             # =========================
-            # ✅ SAVE CACHE
+            # 🚀 SPEED BOOST
             # =========================
+            page.route("**/*", lambda route: route.abort()
+                       if route.request.resource_type in ["image", "font", "media"]
+                       else route.continue_())
+
+            # =========================
+            # 🎯 TOKEN LISTENER
+            # =========================
+            def handle_request(request):
+                nonlocal token_value
+                try:
+                    req_url = request.url
+
+                    if "/chapters" in req_url and "_=" in req_url:
+                        parsed = up.urlparse(req_url)
+                        query = up.parse_qs(parsed.query)
+                        token = query.get("_", [None])[0]
+
+                        if token:
+                            print("🔥 TOKEN FOUND:", token)
+                            token_value = token
+
+                except:
+                    traceback.print_exc()
+
+            page.on("request", handle_request)
+
+            print("🌐 Opening:", url)
+
+            # ⚡ faster than networkidle
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+            # =========================
+            # ⏳ SHORT WAIT LOOP
+            # =========================
+            start = time.time()
+            while time.time() - start < 6:
+                if token_value:
+                    break
+                time.sleep(0.2)
+
+            browser.close()
+
+        # =========================
+        # ✅ SAVE CACHE
+        # =========================
+        if token_value:
             token_cache[url] = {
-                "token": token_data["value"],
+                "token": token_value,
                 "expires": time.time() + CACHE_TTL
             }
 
             return jsonify({
                 "success": True,
-                "token": token_data["value"],
+                "token": token_value,
                 "cached": False
             })
 
