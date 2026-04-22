@@ -120,7 +120,6 @@ def get_token():
 
     try:
         token_value = None
-        done = {"value": False}
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -134,17 +133,16 @@ def get_token():
 
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-                viewport={"width": 1280, "height": 800},
-                java_script_enabled=True
+                viewport={"width": 1280, "height": 800}
             )
 
             page = context.new_page()
 
             # =========================
-            # 🚀 BLOCK HEAVY FILES
+            # 🚀 SPEED BOOST
             # =========================
             page.route("**/*", lambda route: route.abort()
-                       if route.request.resource_type in ["image", "font", "media", "stylesheet"]
+                       if route.request.resource_type in ["image", "font", "media"]
                        else route.continue_())
 
             # =========================
@@ -163,13 +161,6 @@ def get_token():
                         if token:
                             print("🔥 TOKEN FOUND:", token)
                             token_value = token
-                            done["value"] = True
-
-                            # 🚀 STOP EVERYTHING ASAP
-                            try:
-                                page.close()
-                            except:
-                                pass
 
                 except:
                     traceback.print_exc()
@@ -178,27 +169,19 @@ def get_token():
 
             print("🌐 Opening:", url)
 
-            # ⚡ FASTEST LOAD MODE
-            page.goto(url, wait_until="commit", timeout=20000)
+            # ⚡ faster than networkidle
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
             # =========================
             # ⏳ SHORT WAIT LOOP
             # =========================
             start = time.time()
-            while time.time() - start < 8:
-                if done["value"]:
+            while time.time() - start < 6:
+                if token_value:
                     break
-                time.sleep(0.1)
+                time.sleep(0.2)
 
-            # cleanup (safe)
-            try:
-                context.close()
-            except:
-                pass
-            try:
-                browser.close()
-            except:
-                pass
+            browser.close()
 
         # =========================
         # ✅ SAVE CACHE
