@@ -94,6 +94,92 @@ def proxy():
     if r:
         return Response(r.content, status=200, content_type=r.headers.get("content-type"))
     return "Failed", 500
+@app.route("/get_token")
+def get_token():
+    global playwright, browser
+
+    target_url = request.args.get("url")
+    if not target_url:
+        return jsonify({"success": False, "error": "Missing url"}), 400
+
+    try:
+        print("🚀 Getting token for:", target_url)
+
+        # Start playwright if not started
+        if playwright is None:
+            playwright = sync_playwright().start()
+
+        if browser is None:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+        )
+
+        page = context.new_page()
+
+        token_data = {"value": None}
+
+        def handle_request(request):
+            try:
+                url = request.url
+
+                if "/chapters" in url and "_=" in url:
+                    print("✅ TOKEN REQUEST:", url)
+
+                    import urllib.parse as up
+                    parsed = up.urlparse(url)
+                    query = up.parse_qs(parsed.query)
+
+                    token = query.get("_", [None])[0]
+
+                    if token:
+                        print("🔥 TOKEN FOUND:", token)
+                        token_data["value"] = token
+
+                        # 🔥 CLOSE IMMEDIATELY
+                        page.close()
+                        context.close()
+
+            except Exception as e:
+                print("❌ Handler error:", e)
+
+        page.on("request", handle_request)
+
+        page.goto(target_url, wait_until="networkidle")
+
+        # wait max 8 seconds
+        import time
+        start = time.time()
+
+        while time.time() - start < 8:
+            if token_data["value"]:
+                break
+            time.sleep(0.3)
+
+        if token_data["value"]:
+            return jsonify({
+                "success": True,
+                "token": token_data["value"]
+            })
+
+        return jsonify({
+            "success": False,
+            "error": "Token not found"
+        }), 500
+
+    except Exception as e:
+        import traceback
+        print("❌ Fatal error:")
+        traceback.print_exc()
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 @app.route("/api_proxy")
 def api_proxy():
     global context
